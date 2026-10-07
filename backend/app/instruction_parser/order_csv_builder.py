@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from ..settings import Settings, get_settings
 from .instruction_models import AlgoType, HedgeFlag, InstructionParseResult, LegIndex, Offset, Order, Side
 
 
@@ -57,6 +58,9 @@ class TwapRow:
 
 class OrderCsvBuilder:
     """Build target CSV rows from parsed orders."""
+
+    def __init__(self, settings: Settings | None = None) -> None:
+        self.settings = settings or get_settings()
 
     twap_headers = [
         "算法类别",
@@ -185,7 +189,7 @@ class OrderCsvBuilder:
             order_ratio="",
             side=self._resolve_side(order),
             offset=self._resolve_offset(order),
-            broker_code="gtjaqh",
+            broker_code=self.settings.ctp_broker_id,
             investor_code=order.account or "",
             counter_code="ctp_prod",
             counter_account="1023017",
@@ -197,7 +201,7 @@ class OrderCsvBuilder:
             "ExtensionOrder",
             "ctp_prod",
             "1023017",
-            "gtjaqh",
+            self.settings.ctp_broker_id,
             order.account or "",
             self._resolve_hedge_flag(order),
             self._format_contract_code(order),
@@ -232,7 +236,7 @@ class OrderCsvBuilder:
                     self._resolve_offset(order),
                     "0000000001",
                     raw_instruction,
-                    "gtjaqh",
+                    self.settings.ctp_broker_id,
                     order.account or "",
                     "ctp_prod",
                     "1023017",
