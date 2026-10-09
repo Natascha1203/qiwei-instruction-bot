@@ -60,6 +60,9 @@ class Settings(BaseSettings):
     xgo_investor_code: str = ""
     xgo_app_code: str = ""
     xgo_auth_code: str = ""
+    xgo_broker_id: str = ""
+    xgo_counter_code: str = ""
+    xgo_counter_account: str = ""
     xgo_request_timeout: int = 15
 
     file_store_dir: str = "./data/output"
