@@ -194,6 +194,13 @@ class XGoClient:
                 self._verify_account(spec.investor_code, spec)
 
             request = self._build_twap_request(spec)
+            logger.info(
+                "xgo insert_twap_order request: contract=%s side=%s offset=%s target_unit=%s slice_count=%s"
+                " investor=%s broker=%s counter=%s/%s style=%s formal_name=%s",
+                spec.contract_code, spec.side, spec.offset, spec.target_unit, spec.slice_count,
+                spec.investor_code, spec.broker_code, spec.counter_code, spec.counter_account,
+                spec.trading_style_code, spec.formal_name,
+            )
             ret = self._future_request(
                 lambda request_id: self._api.insert_twap_order(
                     request_id=request_id,
@@ -243,6 +250,11 @@ class XGoClient:
 
     def _verify_account(self, investor_code: str, spec: TwapOrderSpec) -> None:
         settings = self.settings
+        logger.info(
+            "xgo verify_broker_app_token request: investor=%s broker=%s counter=%s/%s app_code=%s",
+            investor_code, spec.broker_code, spec.counter_code, spec.counter_account,
+            settings.xgo_app_code.strip(),
+        )
         ret = self._future_request(
             lambda request_id: self._api.verify_broker_app_token(
                 request_id=request_id,
