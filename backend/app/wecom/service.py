@@ -2,6 +2,7 @@ import logging
 import threading
 
 from ..models import RawMessage, SourceMeta
+from ..services import process_file_message, process_text_message
 from ..settings import get_settings
 from .adapter import WeComWebSocketAdapter
 from .models import BotOutboundMessage, WECOM_BOT_TYPE
@@ -32,9 +33,6 @@ def _release_processing_slot() -> None:
 
 
 def process_wecom_message(payload: dict, connection_manager) -> BotOutboundMessage:
-    # 延迟导入打破 app.services <-> app.wecom 循环依赖
-    from ..services import process_file_message, process_text_message
-
     adapter = WeComWebSocketAdapter(_allowed_chatids())
     sender = WeComWebSocketSender(connection_manager)
     inbound = adapter.parse_inbound(payload)

@@ -423,6 +423,13 @@ class CTPClient:
         with self._contracts_lock:
             return sorted(self._contracts.keys())
 
+    def contract_lines(self) -> list[str]:
+        with self._contracts_lock:
+            return [
+                f"{symbol}\t{info.get('exchange') or ''}"
+                for symbol, info in sorted(self._contracts.items())
+            ]
+
     def contracts_loaded(self) -> bool:
         return self._contracts_loaded
 

@@ -513,7 +513,7 @@ class InstructionParser:
             self._set_current_text(self._remove_match(text, match))
             return self._success(message)
 
-        # 非spread, 实际是2个指令: 按 buy/sell 分段分别提取开平字段
+        # 非价差两腿: 按 buy/sell 分段分别提取开平字段
         leg_segments = self._get_leg_segments()
         if len(leg_segments) != len(orders):
             return self._failure("无法分段提取开平方向")
@@ -938,128 +938,7 @@ class InstructionParser:
             reverse_total, reverse_today = self._resolve_reverse_position(order, position)
             resolved_orders.extend(self._build_auto_offset_orders(order, reverse_total, reverse_today))
 
-        orders[:] = self._rebalance_spread_auto_offset_orders(orders, resolved_orders)
-
-    def _rebalance_spread_auto_offset_orders(
-        self,
-        original_orders: list[Order],
-        resolved_orders: list[Order],
-    ) -> list[Order]:
-        logger.info("_rebalance_spread_auto_offset_orders1")
-        if not (len(original_orders) == 2 and original_orders[0].is_spread):
-            return resolved_orders
-        if len(resolved_orders) == 2:
-            return resolved_orders
-
-        logger.info("_rebalance_spread_auto_offset_orders2")
-        for order in resolved_orders:
-            if order.side is None:
-                self._append_group_warning(
-                    self.cur_index,
-                    "spread自动开平配对失败: 存在未识别买卖方向的订单, 已保留原拆单顺序",
-                )
-                return resolved_orders
-
-        for order in resolved_orders:
-            if order.lots is None or order.lots <= 0:
-                self._append_group_warning(
-                    self.cur_index,
-                    "spread自动开平配对失败: 存在手数不合法的订单, 已保留原拆单顺序",
-                )
-                return resolved_orders
-
-        buy_orders: list[Order] = []
-        sell_orders: list[Order] = []
-        for order in resolved_orders:
-            if order.side == Side.BUY:
-                buy_orders.append(order)
-            elif order.side == Side.SELL:
-                sell_orders.append(order)
-            else:
-                self._append_group_warning(
-                    self.cur_index,
-                    "spread自动开平配对失败: 买卖方向异常, 已保留原拆单顺序",
-                )
-                return resolved_orders
-
-        if not buy_orders or not sell_orders:
-            self._append_group_warning(
-                self.cur_index,
-                "spread自动开平配对失败: 买卖两组订单不完整, 已保留原拆单顺序",
-            )
-            return resolved_orders
-
-        buy_total = sum(order.lots for order in buy_orders if order.lots is not None)
-        sell_total = sum(order.lots for order in sell_orders if order.lots is not None)
-        if buy_total != sell_total:
-            self._append_group_warning(
-                self.cur_index,
-                "spread自动开平配对失败: 买卖总手数不一致, 已保留原拆单顺序",
-            )
-            return resolved_orders
-
-        paired_orders: list[Order] = []
-        buy_remaining_lots = [order.lots or 0 for order in buy_orders]
-        sell_remaining_lots = [order.lots or 0 for order in sell_orders]
-        buy_index = 0
-        sell_index = 0
-
-        while buy_index < len(buy_orders) and sell_index < len(sell_orders):
-            buy_order = buy_orders[buy_index]
-            sell_order = sell_orders[sell_index]
-            buy_remaining = buy_remaining_lots[buy_index]
-            sell_remaining = sell_remaining_lots[sell_index]
-            matched_lots = min(buy_remaining, sell_remaining)
-
-            if matched_lots <= 0:
-                self._append_group_warning(
-                    self.cur_index,
-                    "spread自动开平配对失败: 存在手数不合法的订单, 已保留原拆单顺序",
-                )
-                return resolved_orders
-
-            if matched_lots == buy_order.lots and matched_lots == buy_remaining:
-                paired_orders.append(buy_order)
-            else:
-                paired_orders.append(self._clone_order_with_offset(buy_order, buy_order.offset, matched_lots))
-
-            if matched_lots == sell_order.lots and matched_lots == sell_remaining:
-                paired_orders.append(sell_order)
-            else:
-                paired_orders.append(self._clone_order_with_offset(sell_order, sell_order.offset, matched_lots))
-
-            buy_remaining_lots[buy_index] -= matched_lots
-            sell_remaining_lots[sell_index] -= matched_lots
-
-            if buy_remaining_lots[buy_index] == 0:
-                buy_index += 1
-            if sell_remaining_lots[sell_index] == 0:
-                sell_index += 1
-
-        if not paired_orders:
-            self._append_group_warning(
-                self.cur_index,
-                "spread自动开平配对失败: 未生成有效配对订单, 已保留原拆单顺序",
-            )
-            return resolved_orders
-        if len(paired_orders) % 2 != 0:
-            self._append_group_warning(
-                self.cur_index,
-                "spread自动开平配对失败: 配对结果数量异常, 已保留原拆单顺序",
-            )
-            return resolved_orders
-
-        for index in range(0, len(paired_orders), 2):
-            first = paired_orders[index]
-            second = paired_orders[index + 1]
-            if first.lots != second.lots:
-                self._append_group_warning(
-                    self.cur_index,
-                    "spread自动开平配对失败: 配对结果手数不一致, 已保留原拆单顺序",
-                )
-                return resolved_orders
-        self._append_group_warning(self.cur_index,"spread自动开平拆单后手数配对完成")
-        return paired_orders
+        orders[:] = resolved_orders
 
     def _resolve_reverse_position(self, order: Order, position: dict) -> tuple[int, int]:
         if order.side == Side.BUY:
@@ -1069,10 +948,14 @@ class InstructionParser:
         return 0, 0
 
     def _build_auto_offset_orders(self, order: Order, reverse_total: int, reverse_today: int) -> list[Order]:
-        lots = order.lots
+        lots = order.lots or 0
+        if lots <= 0:
+            return [order]
+
+        closable_lots = max(reverse_total - reverse_today, 0)
         threshold = self.static_info.get_auto_offset_threshold(order.account)
 
-        if reverse_total <= 0 or lots <= 0:
+        if reverse_total <= 0:
             self._append_auto_offset_warning(
                 order,
                 Offset.OPEN,
@@ -1083,103 +966,57 @@ class InstructionParser:
             )
             return [self._clone_order_with_offset(order, Offset.OPEN, lots)]
 
-        if(lots>threshold):
-            closable_lots = reverse_total# max(reverse_total - reverse_today, 0)
-        else:
-            closable_lots = 0 if reverse_today == 0 else reverse_total
+        if reverse_today <= 0:
+            return self._build_close_then_open_orders(order, lots, closable_lots, reverse_today)
 
+        if lots > threshold:
+            return self._build_close_then_open_orders(order, lots, closable_lots, reverse_today)
+
+        self._append_auto_offset_warning(
+            order,
+            Offset.OPEN,
+            lots,
+            reverse_total,
+            reverse_today,
+            split_applied=False,
+        )
+        return [self._clone_order_with_offset(order, Offset.OPEN, lots)]
+
+    def _build_close_then_open_orders(
+        self,
+        order: Order,
+        lots: int,
+        closable_lots: int,
+        reverse_today: int,
+    ) -> list[Order]:
+        reverse_total = closable_lots + max(reverse_today, 0)
         if closable_lots >= lots:
             self._append_auto_offset_warning(
-                            order,
-                            Offset.CLOSE,
-                            lots,
-                            reverse_total,
-                            reverse_today,
-                            split_applied=False,
-                        )
+                order,
+                Offset.CLOSE,
+                lots,
+                reverse_total,
+                reverse_today,
+                split_applied=False,
+            )
             return [self._clone_order_with_offset(order, Offset.CLOSE, lots)]
+
         resolved_orders: list[Order] = []
-        split_applied=False
         if closable_lots > 0:
             resolved_orders.append(self._clone_order_with_offset(order, Offset.CLOSE, closable_lots))
-            split_applied=True
-            self._append_auto_offset_warning(
-                                        order,
-                                        Offset.CLOSE,
-                                        closable_lots,
-                                        reverse_total,
-                                        reverse_today,
-                                        split_applied,
-                                    )
-        remaining_open_lots = lots - closable_lots
-        resolved_orders.append(self._clone_order_with_offset(order, Offset.OPEN, remaining_open_lots))
+        remaining_open_lots = lots - max(closable_lots, 0)
+        if remaining_open_lots > 0:
+            resolved_orders.append(self._clone_order_with_offset(order, Offset.OPEN, remaining_open_lots))
+
         self._append_auto_offset_warning(
-                                                order,
-                                                Offset.OPEN,
-                                                remaining_open_lots,
-                                                reverse_total,
-                                                reverse_today,
-                                                split_applied
-                                            )
-        warning = self._adjust_auto_offset_time(resolved_orders)
-        if warning:
-            self._append_group_warning(self.cur_index, warning)
-        return resolved_orders
-
-
-
-    def _adjust_auto_offset_time(self,orders: list[Order]) -> str:
-
-        # logger.info("_adjust_auto_offset_time")
-        if len(orders) != 2:
-            return "拆单后调整时间: 订单数不为2, 未调整"
-
-        first, second = orders
-        if first.lots is None or second.lots is None:
-            return "拆单后调整时间: 手数不合法, 未调整"
-
-        has_start = first.start_immediately or first.start_time is not None
-        if not has_start or first.end_time is None:
-            return "拆单后调整时间: 未指定起始或结束时间, 未调整"
-
-        end_dt = self._parse_order_time(first.end_time)
-        if end_dt is None:
-            return "拆单后调整时间: 结束时间格式不正确, 未调整"
-        # current time+1 min
-        now = (datetime.now() + timedelta(minutes=1)).replace(microsecond=0)
-        if first.start_immediately:
-            start_dt = now
-        else:
-            start_dt = self._parse_order_time(first.start_time)
-            if start_dt is None:
-                return "拆单后调整时间: 起始时间格式不正确, 未调整"
-        if start_dt >end_dt:
-            return "拆单后调整时间: 起始时间晚于结束时间, 未调整"
-
-        total_lots = first.lots + second.lots
-
-        total_seconds = int((end_dt - start_dt).total_seconds())
-        first_seconds = round(total_seconds * (first.lots-1) / (total_lots-1))
-        first_end_dt = start_dt + timedelta(seconds=first_seconds)
-        second_start_dt = first_end_dt + timedelta(seconds=math.ceil(first_seconds / (first.lots-1)))
-        if second_start_dt > end_dt:
-            second_start_dt = end_dt
-
-        first.start_immediately = False
-        first.start_time = self._format_dt(start_dt)
-        first.end_time = self._format_dt(first_end_dt)
-        second.start_time = self._format_dt(second_start_dt)
-        second.end_time = self._format_dt(end_dt)
-        second.start_immediately = False
-        return f"拆单后调整时间: 1腿范围 {first.start_time} -> {first.end_time}, 2腿范围 {second.start_time} -> {second.end_time}"
-    def _parse_order_time(self, value: str | None) -> datetime | None:
-        if not value:
-            return None
-        try:
-            return datetime.strptime(value, "%Y-%m-%d %H:%M:%S.000+0800")
-        except ValueError:
-            return None
-
+            order,
+            Offset.CLOSE,
+            min(closable_lots, lots),
+            reverse_total,
+            reverse_today,
+            split_applied=True,
+        )
+        return resolved_orders or [self._clone_order_with_offset(order, Offset.OPEN, lots)]
 
     def _clone_order_with_offset(self, order: Order, offset: Offset, lots: int) -> Order:
         order_data = order.model_dump() if hasattr(order, "model_dump") else order.dict()
@@ -1196,6 +1033,8 @@ class InstructionParser:
         reverse_today: int,
         split_applied: bool,
     ) -> None:
+        if lots <= 0:
+            return
 
         action_text = "平仓" if offset == Offset.CLOSE else "开仓"
         account_text = order.account or "未知账户"
@@ -1206,18 +1045,18 @@ class InstructionParser:
         if split_applied:
             warning_parts.append("可平仓不足, 已按可平与开仓拆分订单")
         if offset == Offset.CLOSE and reverse_today > 0:
-            warning_parts.append(f"存在平今风险, 今仓 {reverse_today} 手,触发平今手数阈值为{self.static_info.get_auto_offset_threshold(order.account)}")
-        warning_text = ", ".join(part for part in warning_parts if part)
+            warning_parts.append(f"存在平今风险, 今仓 {reverse_today} 手")
         # debug
-        # logger.info(
-        #     "auto offset warning generated: account=%s contract=%s offset=%s lots=%s warning=%s",
-        #     order.account,
-        #     order.contract,
-        #     offset.value,
-        #     lots,
-        #     warning_text,
-        # )
-        #
+        warning_text = ", ".join(part for part in warning_parts if part)
+        logger.info(
+            "auto offset warning generated: account=%s contract=%s offset=%s lots=%s warning=%s",
+            order.account,
+            order.contract,
+            offset.value,
+            lots,
+            warning_text,
+        )
+        # debug
         self._append_group_warning(self.cur_index, warning_text)
 
     def _parse_time_text(self, text: str) -> dict:
@@ -1357,7 +1196,6 @@ class InstructionParser:
             "start_immediately": immediate,
             "span": span,
         }
-    
 
     def _normalize_end_time(self, value: datetime) -> tuple[datetime, str]:
         if value.hour == 11 and value.minute == 30 and value.second == 0:

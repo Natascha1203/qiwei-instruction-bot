@@ -514,7 +514,14 @@ class InstructionParser:
             for order in orders:
                 if expected_side and order.side and order.side != expected_side:
                     return self._failure("开平方向与买卖方向冲突")
-                order.offset = offset
+                if offset == Offset.OPEN:
+                    order.offset = offset
+            if offset == Offset.CLOSE:
+                if CTP_ENABLE:
+                    self._apply_auto_offset(orders)
+                else:
+                    for order in orders:
+                        order.offset = Offset.CLOSE
             self._set_current_text(self._remove_match(text, match))
             return self._success(message)
 
@@ -525,14 +532,19 @@ class InstructionParser:
 
         messages: list[str] = []
         replacements: list[tuple[int, int]] = []
+        original_orders = list(orders)
+        resolved_orders: list[Order] = []
         for index, segment in enumerate(leg_segments):
-            order = orders[index]
+            order = original_orders[index]
             oc_match = OPEN_CLOSE_PATTERN.search(segment["text"])
             if not oc_match:
                 if CTP_ENABLE:
-                    self._apply_auto_offset([order])
+                    auto_orders = [order]
+                    self._apply_auto_offset(auto_orders)
+                    resolved_orders.extend(auto_orders)
                 else:
                     order.offset = Offset.OPEN
+                    resolved_orders.append(order)
                 continue
 
             token = oc_match.group("token").lower()
@@ -541,10 +553,21 @@ class InstructionParser:
                 messages.append(msg)
             if expected_side and order.side and order.side != expected_side:
                 return self._failure("开平方向与买卖方向冲突")
-            order.offset = offset
+            if offset == Offset.CLOSE:
+                if CTP_ENABLE:
+                    auto_orders = [order]
+                    self._apply_auto_offset(auto_orders)
+                    resolved_orders.extend(auto_orders)
+                else:
+                    order.offset = Offset.CLOSE
+                    resolved_orders.append(order)
+            else:
+                order.offset = offset
+                resolved_orders.append(order)
             start, end = oc_match.span()
             replacements.append((segment["offset"] + start, segment["offset"] + end))
 
+        orders[:] = resolved_orders
         if replacements:
             self._set_current_text(self._remove_spans(text, replacements))
         return self._success("\n".join(messages).strip())
@@ -1075,7 +1098,7 @@ class InstructionParser:
 
     def _build_auto_offset_orders(self, order: Order, reverse_total: int, reverse_today: int) -> list[Order]:
         lots = order.lots
-        threshold = self.static_info.get_auto_offset_threshold(order.account)
+        threshold = self.static_info.get_auto_offset_threshold(order.account, self.current_user_id)
 
         if reverse_total <= 0 or lots <= 0:
             self._append_auto_offset_warning(
@@ -1089,9 +1112,9 @@ class InstructionParser:
             return [self._clone_order_with_offset(order, Offset.OPEN, lots)]
 
         if(lots>threshold):
-            closable_lots = reverse_total# max(reverse_total - reverse_today, 0)
+            closable_lots = reverse_total
         else:
-            closable_lots = 0 if reverse_today == 0 else reverse_total
+            closable_lots = max(reverse_total - reverse_today, 0)
 
         if closable_lots >= lots:
             self._append_auto_offset_warning(
@@ -1210,8 +1233,8 @@ class InstructionParser:
         ]
         if split_applied:
             warning_parts.append("可平仓不足, 已按可平与开仓拆分订单")
-        if offset == Offset.CLOSE and reverse_today > 0:
-            warning_parts.append(f"存在平今风险, 今仓 {reverse_today} 手,触发平今手数阈值为{self.static_info.get_auto_offset_threshold(order.account)}")
+        if offset == Offset.CLOSE and reverse_today > 0 and lots > max(reverse_total - reverse_today, 0):
+            warning_parts.append(f"存在平今风险, 今仓 {reverse_today} 手,触发平今手数阈值为{self.static_info.get_auto_offset_threshold(order.account, self.current_user_id)}")
         warning_text = ", ".join(part for part in warning_parts if part)
         # debug
         # logger.info(
@@ -1249,10 +1272,10 @@ class InstructionParser:
             return self._time_success(start, end, False, span, "已识别 last 1 min, 时间区间调整为 14:59:00-14:59:50")
 
         range_patterns = [
-            re.compile(r"(?P<start>[A-Za-z0-9:]+)\s*-\s*(?P<end>[A-Za-z0-9:]+)", re.IGNORECASE),
-            re.compile(r"(?P<start>[A-Za-z0-9:]+)\s+to\s+(?P<end>[A-Za-z0-9:]+)", re.IGNORECASE),
-            re.compile(r"(?P<start>[A-Za-z0-9:]+)\s+till\s+(?P<end>[A-Za-z0-9:]+)", re.IGNORECASE),
-            re.compile(r"(?P<start>[A-Za-z0-9:]+)\s+until\s+(?P<end>[A-Za-z0-9:]+)", re.IGNORECASE),
+            re.compile(r"(?P<start>[A-Za-z0-9:]+)\s*(?P<sep>-)\s*(?P<end>[A-Za-z0-9:]+)", re.IGNORECASE),
+            re.compile(r"(?P<start>[A-Za-z0-9:]+)\s+(?P<sep>to)\s+(?P<end>[A-Za-z0-9:]+)", re.IGNORECASE),
+            re.compile(r"(?P<start>[A-Za-z0-9:]+)\s+(?P<sep>till)\s+(?P<end>[A-Za-z0-9:]+)", re.IGNORECASE),
+            re.compile(r"(?P<start>[A-Za-z0-9:]+)\s+(?P<sep>until)\s+(?P<end>[A-Za-z0-9:]+)", re.IGNORECASE),
         ]
         for pattern in range_patterns:
             match = pattern.search(text)
@@ -1260,11 +1283,15 @@ class InstructionParser:
                 continue
             start_result = self._parse_start_time_point(match.group("start"), now)
             end_result = self._parse_end_time_point(match.group("end"), now)
+            remove_span = match.span()
+            if start_result is None and end_result is not None:
+                start_result = (now, True)
+                remove_span = (match.start("sep"), match.end("end"))
             if start_result is None or end_result is None:
                 return self._failure("时间格式不合法")
             start_dt, immediate = start_result
             end_dt = end_result
-            return self._time_success(start_dt, end_dt, immediate, match.span(), "")
+            return self._time_success(start_dt, end_dt, immediate, remove_span, "")
 
         duration_match = re.search(r"(?P<duration>\d+(?:\.\d+)?)\s*(?P<unit>m|min|h|hour)\b", text, re.IGNORECASE)
         if duration_match:

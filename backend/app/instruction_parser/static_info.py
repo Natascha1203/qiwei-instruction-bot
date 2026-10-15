@@ -14,7 +14,7 @@ class StaticInfo:
         account_map: dict[str, Any] | None = None,
         contract_alias_map: dict[str, str] | None = None,
         instruction_name_product_map: dict[str, str] | None = None,
-        auto_offset_threshold_map: dict[str, int] | None = None,
+        auto_offset_threshold_map: dict[str, Any] | None = None,
         auto_offset_default_threshold: int = 0,
         month_code_map: dict[str, str] | None = None,
         price_shift_rules: dict[str, Any] | None = None,
@@ -52,11 +52,7 @@ class StaticInfo:
             ).items()
             if key and value
         }
-        self.auto_offset_threshold_map = {
-            key.strip(): int(value)
-            for key, value in (auto_offset_threshold_map or {}).items()
-            if key
-        }
+        self.auto_offset_threshold_map = self._normalize_auto_offset_threshold_map(auto_offset_threshold_map or {})
         self.auto_offset_default_threshold = int(auto_offset_default_threshold)
         self.month_code_map = month_code_map or {
             "F": "01",
@@ -218,6 +214,20 @@ class StaticInfo:
             self.account_map["default"] = default_account_map
             return f"默认资金账号={account}"
 
+        if name == "允许平今手数阈值":
+            threshold = self._parse_non_negative_int(raw_value, "允许平今手数阈值")
+            normalized_user_id = user_id.strip()
+            if not normalized_user_id:
+                raise ValueError("缺少userid，无法设置允许平今手数阈值")
+            default_value = self.auto_offset_threshold_map.get("default")
+            if isinstance(default_value, dict):
+                default_threshold_map = deepcopy(default_value)
+            else:
+                default_threshold_map = {}
+            default_threshold_map[normalized_user_id] = threshold
+            self.auto_offset_threshold_map["default"] = default_threshold_map
+            return f"允许平今手数阈值={threshold}"
+
         if name == "单腿价格保护带":
             self.price_limit_ratio = self._parse_percent(raw_value, "单腿价格保护带")
             return f"单腿价格保护带={self._format_percent(self.price_limit_ratio)}"
@@ -247,12 +257,36 @@ class StaticInfo:
                 return self.instruction_name_product_map[key]
         return None
 
-    def get_auto_offset_threshold(self, account: str | None) -> int:
+    def get_auto_offset_threshold(self, account: str | None, user_id: str = "") -> int:
         if account:
             account_key = account.strip()
             if account_key in self.auto_offset_threshold_map:
                 return self.auto_offset_threshold_map[account_key]
+        default_value = self.auto_offset_threshold_map.get("default")
+        normalized_user_id = user_id.strip()
+        if isinstance(default_value, dict):
+            if normalized_user_id and normalized_user_id in default_value:
+                return int(default_value[normalized_user_id])
+        elif default_value is not None:
+            return int(default_value)
         return self.auto_offset_default_threshold
+
+    @staticmethod
+    def _normalize_auto_offset_threshold_map(raw_map: dict[str, Any]) -> dict[str, Any]:
+        normalized: dict[str, Any] = {}
+        for key, value in raw_map.items():
+            if not key:
+                continue
+            normalized_key = key.strip()
+            if normalized_key == "default" and isinstance(value, dict):
+                normalized[normalized_key] = {
+                    str(user_id).strip(): int(threshold)
+                    for user_id, threshold in value.items()
+                    if str(user_id).strip()
+                }
+            else:
+                normalized[normalized_key] = int(value)
+        return normalized
 
     def get_month_code(self, text: str) -> str:
         key = text.strip().upper()
@@ -345,6 +379,15 @@ class StaticInfo:
             return float(raw_value.strip())
         except ValueError as exc:
             raise ValueError(f"{field_name}必须是数字") from exc
+
+    def _parse_non_negative_int(self, raw_value: str, field_name: str) -> int:
+        try:
+            value = int(raw_value.strip())
+        except ValueError as exc:
+            raise ValueError(f"{field_name}必须是整数") from exc
+        if value < 0:
+            raise ValueError(f"{field_name}不能小于0")
+        return value
 
     def _parse_percent(self, raw_value: str, field_name: str) -> float:
         value = raw_value.strip()

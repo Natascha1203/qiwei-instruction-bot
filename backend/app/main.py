@@ -1,16 +1,30 @@
 import logging
 import signal
 import threading
+from pathlib import Path
 
 from .ctp import CTPClient, CTP_IMPORT_ERROR, api
 from .logging_config import setup_logging
 from .settings import get_settings
 from .wecom import start_wecom_connector, stop_wecom_connector
-from .xgo import XGO_IMPORT_ERROR, get_xgo_client
 
 
 _shutdown_event = threading.Event()
 logger = logging.getLogger(__name__)
+
+
+def _write_contracts_log(client: CTPClient) -> None:
+    log_dir = Path("log")
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        lines = client.contract_lines()
+        with (log_dir / "contract.log").open("w", encoding="utf-8") as log_file:
+            log_file.write(f"# 启动加载合约总数: {len(lines)}\n")
+            log_file.write("\n".join(lines))
+            log_file.write("\n")
+        logger.info("contracts written to log/contract.log: count=%s", len(lines))
+    except OSError as exc:
+        logger.error("write contract.log failed: %s", exc)
 
 
 def startup_event() -> None:
@@ -24,7 +38,6 @@ def startup_event() -> None:
         f" single_file_enabled={settings.wecom_single_file_enabled}"
     )
     logger.info("ctp enabled=%s", settings.ctp_enabled)
-    logger.info("twap api enabled=%s", settings.twap_api_enabled)
     start_wecom_connector()
     if settings.ctp_enabled:
         front_addr = f"tcp://{settings.ctp_host}:{settings.ctp_port}"
@@ -47,42 +60,20 @@ def startup_event() -> None:
             if client.load_contracts():
                 contract_symbols = client.contract_symbols()
                 logger.info("ctp contracts loaded: count=%s", len(contract_symbols))
+                _write_contracts_log(client)
                 # logger.info("ctp loaded contracts: %s", contract_symbols)
             else:
                 logger.error("ctp load_contracts failed: %s", client.last_error())
         else:
             logger.error("ctp connect failed: %s", client.last_error())
-    if settings.twap_api_enabled:
-        logger.info(
-            "xgo config:"
-            f" ip={settings.xgo_ip}"
-            f" port={settings.xgo_port}"
-            f" account_code_set={bool(settings.xgo_account_code)}"
-            f" login_key_set={bool(settings.xgo_login_key)}"
-            f" sdk_loaded={XGO_IMPORT_ERROR is None}"
-        )
-        if XGO_IMPORT_ERROR is not None:
-            logger.error("xgo import error: %r", XGO_IMPORT_ERROR)
-        client = get_xgo_client()
-        if client.is_configured():
-            logger.info("xgo connect and login start")
-            if client.connect_and_login():
-                logger.info("xgo connect and login ok")
-            else:
-                logger.error("xgo connect and login failed: %s", client.last_error())
-        else:
-            logger.error("xgo client not configured, twap orders will fall back to csv")
     logger.info("startup completed")
 
 
 def shutdown_event() -> None:
     logger.info("shutdown begin")
     stop_wecom_connector()
-    settings = get_settings()
-    if settings.ctp_enabled:
+    if get_settings().ctp_enabled:
         CTPClient.get_instance().release()
-    if settings.twap_api_enabled:
-        get_xgo_client().release()
     logger.info("shutdown completed")
 
 

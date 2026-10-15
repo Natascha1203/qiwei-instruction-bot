@@ -10,7 +10,7 @@ from .instruction_models import (
     ParsedOrder,
     Side,
 )
-from .order_csv_builder import OrderCsvBuilder, TwapRow
+from .order_csv_builder import OrderCsvBuilder
 from .parser import InstructionParser
 from .static_info import StaticInfo
 
@@ -26,5 +26,4 @@ __all__ = [
     "ParsedOrder",
     "Side",
     "StaticInfo",
-    "TwapRow",
 ]
