@@ -49,6 +49,23 @@ class Settings(BaseSettings):
     wecom_response_timeout: int = 10
     wecom_single_file_enabled: bool = True
 
+    twap_api_enabled: bool = False
+
+    xgo_ip: str = ""
+    xgo_port: int = 0
+    xgo_query_timeout: int = 300
+    xgo_log_level: str = "info"
+    xgo_auto_reconnect: bool = True
+    xgo_account_code: str = ""
+    xgo_login_key: str = ""
+    xgo_investor_code: str = ""
+    xgo_app_code: str = ""
+    xgo_auth_code: str = ""
+    xgo_broker_id: str = "gtjaqh"
+    xgo_counter_code: str = "ctp_prod"
+    xgo_counter_account: str = "1023017"
+    xgo_request_timeout: int = 15
+
     file_store_dir: str = "./data/output"
     file_download_timeout: int = 30
     instruction_parser_static_info_path: str = "./config/instruction_parser_static_info.json"

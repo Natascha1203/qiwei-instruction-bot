@@ -1,12 +1,66 @@
 import csv
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from ..settings import Settings, get_settings
 from .instruction_models import AlgoType, HedgeFlag, InstructionParseResult, LegIndex, Offset, Order, Side
+
+
+@dataclass(frozen=True)
+class TwapRow:
+    """一行 TWAP 模板数据，字段顺序与 twap_headers 一致，CSV 写出与 xGo 直发共用。"""
+
+    formal_name: str
+    start_timing: str
+    start_time: str
+    stop_timing: str
+    stop_time: str
+    target_unit: str
+    trading_style_code: str
+    caption: str
+    contract_code: str
+    hedge_flag: str
+    order_ratio: str
+    side: str
+    offset: str
+    broker_code: str
+    investor_code: str
+    counter_code: str
+    counter_account: str
+    slice_count: str
+
+    def as_csv_row(self) -> list[str]:
+        return [
+            "TWAP",
+            self.formal_name,
+            self.start_timing,
+            self.start_time,
+            self.stop_timing,
+            self.stop_time,
+            self.target_unit,
+            self.trading_style_code,
+            self.caption,
+            "",
+            "",
+            self.contract_code,
+            self.hedge_flag,
+            self.order_ratio,
+            self.side,
+            self.offset,
+            self.broker_code,
+            self.investor_code,
+            self.counter_code,
+            self.counter_account,
+            self.slice_count,
+        ]
 
 
 class OrderCsvBuilder:
     """Build target CSV rows from parsed orders."""
+
+    def __init__(self, settings: Settings | None = None) -> None:
+        self.settings = settings or get_settings()
 
     twap_headers = [
         "算法类别",
@@ -86,10 +140,10 @@ class OrderCsvBuilder:
             if not orders[0].is_spread:
                 for order in orders:
                     if order.algo_type == AlgoType.TWAP:
-                        grouped_rows["twap"].append(self._build_twap_row(order, group.raw_instruction))
+                        grouped_rows["twap"].append(self.build_twap_row(order, group.raw_instruction).as_csv_row())
                     else:
                         grouped_rows["extension"].append(self._build_extension_order_row(order, group.raw_instruction))
-            else:   
+            else:
                 grouped_rows["spread"].extend(self._build_spread_rows(orders, group.raw_instruction))
         return grouped_rows
 
@@ -117,40 +171,37 @@ class OrderCsvBuilder:
             written_paths[file_type] = str(target_path)
         return written_paths
 
-    def _build_twap_row(self, order: Order, raw_instruction: str) -> list[str]:
+    def build_twap_row(self, order: Order, raw_instruction: str) -> TwapRow:
         start_at, start_value = self._resolve_start_fields(order)
         end_at, end_value = self._resolve_end_fields(order)
         lots = self._stringify_int(order.lots)
-        return [
-            "TWAP",
-            order.instruction_name or self._default_instruction_name(order),
-            start_at,
-            start_value,
-            end_at or "CustomTime",
-            end_value,
-            lots,
-            "000000000a",
-            raw_instruction,
-            "",
-            "",
-            self._format_contract_code(order),
-            self._resolve_hedge_flag(order),
-            "",
-            self._resolve_side(order),
-            self._resolve_offset(order),
-            "gtjaqh",
-            order.account or "",
-            "ctp_prod",
-            "1023017",
-            lots,
-        ]
+        return TwapRow(
+            formal_name=order.instruction_name or self._default_instruction_name(order),
+            start_timing=start_at,
+            start_time=start_value,
+            stop_timing=end_at or "CustomTime",
+            stop_time=end_value,
+            target_unit=lots,
+            trading_style_code="000000000a",
+            caption=raw_instruction,
+            contract_code=self._format_contract_code(order),
+            hedge_flag=self._resolve_hedge_flag(order),
+            order_ratio="",
+            side=self._resolve_side(order),
+            offset=self._resolve_offset(order),
+            broker_code=self.settings.xgo_broker_id,
+            investor_code=order.account or "",
+            counter_code=self.settings.xgo_counter_code,
+            counter_account=self.settings.xgo_counter_account,
+            slice_count=lots,
+        )
 
     def _build_extension_order_row(self, order: Order, raw_instruction: str) -> list[str]:
         return [
             "ExtensionOrder",
-            "ctp_prod",
-            "1023017",
-            "gtjaqh",
+            self.settings.xgo_counter_code,
+            self.settings.xgo_counter_account,
+            self.settings.xgo_broker_id,
             order.account or "",
             self._resolve_hedge_flag(order),
             self._format_contract_code(order),
@@ -185,10 +236,10 @@ class OrderCsvBuilder:
                     self._resolve_offset(order),
                     "0000000001",
                     raw_instruction,
-                    "gtjaqh",
+                    self.settings.xgo_broker_id,
                     order.account or "",
-                    "ctp_prod",
-                    "1023017",
+                    self.settings.xgo_counter_code,
+                    self.settings.xgo_counter_account,
                     "LeftPrice",
                     "0",
                     "LE",
@@ -224,7 +275,7 @@ class OrderCsvBuilder:
         for order in orders:
             if order.end_time:
                 return order.end_time
-        now = datetime.now() # if end time is none ,use 14:50
+        now = datetime.now()  # if end time is none ,use 14:50
         return now.replace(hour=14, minute=50, second=0, microsecond=0).strftime("%Y-%m-%d %H:%M:%S.000+0800")
 
     def _resolve_leg_number(self, order: Order) -> str:

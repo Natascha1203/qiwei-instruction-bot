@@ -7,6 +7,7 @@ from .ctp import CTPClient, CTP_IMPORT_ERROR, api
 from .logging_config import setup_logging
 from .settings import get_settings
 from .wecom import start_wecom_connector, stop_wecom_connector
+from .xgo import XGO_IMPORT_ERROR, get_xgo_client
 
 
 _shutdown_event = threading.Event()
@@ -38,6 +39,7 @@ def startup_event() -> None:
         f" single_file_enabled={settings.wecom_single_file_enabled}"
     )
     logger.info("ctp enabled=%s", settings.ctp_enabled)
+    logger.info("twap api enabled=%s", settings.twap_api_enabled)
     start_wecom_connector()
     if settings.ctp_enabled:
         front_addr = f"tcp://{settings.ctp_host}:{settings.ctp_port}"
@@ -66,14 +68,37 @@ def startup_event() -> None:
                 logger.error("ctp load_contracts failed: %s", client.last_error())
         else:
             logger.error("ctp connect failed: %s", client.last_error())
+    if settings.twap_api_enabled:
+        logger.info(
+            "xgo config:"
+            f" ip={settings.xgo_ip}"
+            f" port={settings.xgo_port}"
+            f" account_code_set={bool(settings.xgo_account_code)}"
+            f" login_key_set={bool(settings.xgo_login_key)}"
+            f" sdk_loaded={XGO_IMPORT_ERROR is None}"
+        )
+        if XGO_IMPORT_ERROR is not None:
+            logger.error("xgo import error: %r", XGO_IMPORT_ERROR)
+        client = get_xgo_client()
+        if client.is_configured():
+            logger.info("xgo connect and login start")
+            if client.connect_and_login():
+                logger.info("xgo connect and login ok")
+            else:
+                logger.error("xgo connect and login failed: %s", client.last_error())
+        else:
+            logger.error("xgo client not configured, twap orders will fall back to csv")
     logger.info("startup completed")
 
 
 def shutdown_event() -> None:
     logger.info("shutdown begin")
     stop_wecom_connector()
-    if get_settings().ctp_enabled:
+    settings = get_settings()
+    if settings.ctp_enabled:
         CTPClient.get_instance().release()
+    if settings.twap_api_enabled:
+        get_xgo_client().release()
     logger.info("shutdown completed")
 
 

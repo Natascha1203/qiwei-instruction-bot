@@ -1,5 +1,6 @@
 import logging
 import re
+from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
@@ -8,7 +9,16 @@ from urllib.parse import unquote, urlparse
 from .ctp import get_contract_info
 from .file_converter import convert_xlsx_to_order_csv
 from .fileio import get_file_download_client
-from .instruction_parser import InstructionParseResult, InstructionParser, OrderCsvBuilder, StaticInfo
+from .instruction_parser import (
+    AlgoType,
+    InstructionParseResult,
+    InstructionParser,
+    Offset,
+    Order,
+    OrderCsvBuilder,
+    Side,
+    StaticInfo,
+)
 from .models import FileProcessResult, ProcessResult, RawMessage
 from .settings import get_settings
 from .storage import build_output_filename, ensure_output_dir, save_bytes
@@ -16,6 +26,7 @@ from .wecom.file_decryptor import decrypt_wecom_file_bytes_with_key, validate_de
 from .wecom.models import BotInboundMessage
 from .wecom.response import get_wecom_response_client
 from .wecom.webhook import get_wecom_webhook_client
+from .xgo import XgoSendResult, get_xgo_client, xgo_available
 
 logger = logging.getLogger(__name__)
 
@@ -36,18 +47,34 @@ class MessageProcessingService:
             return command_result
 
         instruction_result = self.parser.parse(raw.content, raw.source.user_id)
+
+        api_records: list[TwapApiRecord] = []
+        degrade_reason = ""
+        csv_result = instruction_result
+        if self.settings.twap_api_enabled:
+            client = get_xgo_client()
+            if xgo_available() and client.is_configured():
+                csv_result, api_records = dispatch_twap_orders(instruction_result, client)
+            else:
+                degrade_reason = "TWAP直发模式已开启，但xGo客户端未配置或SDK不可用，本批指令已回退CSV输出"
+
         output_dir = Path(self.settings.file_store_dir) / "text_message"
         ensure_output_dir(str(output_dir))
         output_base_path = output_dir / "instruction.csv"
-        file_path_map = self.csv_builder.write_csv(instruction_result, str(output_base_path))
+        file_path_map = self.csv_builder.write_csv(csv_result, str(output_base_path))
         file_paths = [path for _file_type, path in sorted(file_path_map.items())]
+
+        callback_text = build_instruction_markdown(instruction_result)
+        api_markdown = build_twap_api_results_markdown(api_records, degrade_reason)
+        if api_markdown:
+            callback_text = f"{callback_text}\n\n{api_markdown}"
 
         return ProcessResult(
             ok=instruction_result.success,
             instruction_parse_result=instruction_result,
             file_path=file_paths[0] if file_paths else None,
             file_paths=file_paths,
-            callback_text=build_instruction_markdown(instruction_result),
+            callback_text=callback_text,
         )
 
     def process_file_message(self, inbound: BotInboundMessage) -> FileProcessResult:
@@ -223,6 +250,77 @@ def _is_set_setting_command(content: str) -> bool:
 def _build_current_setting_markdown(static_info: StaticInfo) -> str:
     lines = ["**当前静态设置**", *static_info.format_supported_settings()]
     return "\n".join(lines).strip()
+
+
+@dataclass
+class TwapApiRecord:
+    order: Order
+    result: XgoSendResult
+
+
+def dispatch_twap_orders(
+    result: InstructionParseResult,
+    client,
+) -> tuple[InstructionParseResult, list[TwapApiRecord]]:
+    """对解析成功的 TWAP 订单逐单调 API 下单；全部成功的组从 CSV 集合剔除，任一失败则整组保留回退 CSV。"""
+    records: list[TwapApiRecord] = []
+    csv_builder = OrderCsvBuilder()
+    new_groups = []
+    for group in result.groups:
+        twap_orders = [
+            order
+            for order in group.orders
+            if order.algo_type == AlgoType.TWAP and not order.is_spread
+        ]
+        if group.error.strip() or not twap_orders:
+            new_groups.append(group)
+            continue
+
+        group_all_ok = True
+        for order in twap_orders:
+            row = csv_builder.build_twap_row(order, group.raw_instruction)
+            send_result = client.send_twap_order(row)
+            records.append(TwapApiRecord(order=order, result=send_result))
+            if not send_result.ok:
+                group_all_ok = False
+
+        if group_all_ok:
+            remaining = [
+                order
+                for order in group.orders
+                if order.algo_type != AlgoType.TWAP or order.is_spread
+            ]
+            if remaining:
+                new_groups.append(group.model_copy(update={"orders": remaining}))
+        else:
+            new_groups.append(group)
+
+    filtered = result.model_copy(update={"groups": new_groups})
+    return filtered, records
+
+
+def build_twap_api_results_markdown(records: list[TwapApiRecord], degrade_reason: str = "") -> str:
+    if not records and not degrade_reason:
+        return ""
+    lines = ["**TWAP API直发结果**"]
+    if degrade_reason:
+        lines.append(f"- {degrade_reason}")
+    for record in records:
+        summary = _format_order_summary(record.order)
+        if record.result.ok:
+            lines.append(f"- 已通过API发送: {summary}, 算法报单号 {record.result.algo_entry_code}")
+        else:
+            lines.append(f"- API发送失败已回退CSV: {summary}, 原因: {record.result.error}")
+    return "\n".join(lines).strip()
+
+
+def _format_order_summary(order: Order) -> str:
+    side_text = "买" if order.side == Side.BUY else "卖"
+    offset_text = "开" if order.offset == Offset.OPEN else "平"
+    contract = (order.contract or "").strip()
+    exchange = (order.exchange or "").strip()
+    contract_code = f"{contract}.{exchange}" if contract and exchange else contract
+    return f"{contract_code} {side_text}{offset_text} {order.lots}手"
 
 
 def build_instruction_markdown(result: InstructionParseResult) -> str:
